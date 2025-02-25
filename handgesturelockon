@@ -1,0 +1,112 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import tensorflow as tf
+import tensorflow_hub as hub
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7)
+
+# Load the pre-trained person detection model
+detector = hub.load("https://tfhub.dev/tensorflow/ssd_mobilenet_v2/2")
+
+# COCO labels mapping (only need 'person')
+coco_labels = {1: 'person'}
+
+# Define a function to recognize specific hand gestures
+def recognize_gesture(hand_landmarks):
+    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+    thumb_ip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_IP]
+    if thumb_tip.y < thumb_ip.y:
+        return 'thumb_up'
+    elif thumb_tip.y > thumb_ip.y:
+        return 'thumb_down'
+    return None
+
+# Function to detect people in the frame
+def detect_people(frame):
+    input_tensor = tf.convert_to_tensor(frame)
+    input_tensor = input_tensor[tf.newaxis, ...]
+    detections = detector(input_tensor)
+    return detections
+
+# Function to draw bounding boxes
+def draw_boxes(frame, boxes, class_ids, scores, min_score=0.5):
+    height, width, _ = frame.shape
+    best_box = None
+    highest_score = min_score
+    for i in range(boxes.shape[0]):
+        if scores[i] >= min_score and class_ids[i] == 1:
+            box = boxes[i] * np.array([height, width, height, width])
+            (startY, startX, endY, endX) = box.astype("int")
+            if scores[i] > highest_score:
+                highest_score = scores[i]
+                best_box = (startY, startX, endY, endX)
+
+    if best_box:
+        (startY, startX, endY, endX) = best_box
+        cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+        y = startY - 15 if startY - 15 > 15 else startY + 15
+        cv2.putText(frame, f"Person: {highest_score:.2f}", (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    return best_box
+
+# Start video capture
+cap = cv2.VideoCapture(0)
+lock_on_person = False
+tracker = None
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Process hands
+    results = hands.process(frame_rgb)
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            gesture = recognize_gesture(hand_landmarks)
+            if gesture == 'thumb_up' and not lock_on_person:
+                lock_on_person = True
+                cv2.putText(frame, 'Locking on you!', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            elif gesture == 'thumb_down' and lock_on_person:
+                lock_on_person = False
+                tracker = None
+                cv2.putText(frame, 'Stopped tracking!', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    if lock_on_person:
+        if tracker is None:
+            # Detect people in the frame
+            detections = detect_people(frame)
+            boxes = detections['detection_boxes'][0].numpy()
+            class_ids = detections['detection_classes'][0].numpy().astype(np.int32)
+            scores = detections['detection_scores'][0].numpy()
+
+            # Initialize tracker with the best box
+            best_box = draw_boxes(frame, boxes, class_ids, scores)
+            if best_box:
+                (startY, startX, endY, endX) = best_box
+                tracker = cv2.TrackerCSRT_create()  # You can choose different trackers like KCF, CSRT, etc.
+                tracker.init(frame, (startX, startY, endX - startX, endY - startY))
+        else:
+            # Update the tracker
+            success, box = tracker.update(frame)
+            if success:
+                (startX, startY, w, h) = [int(v) for v in box]
+                endX = startX + w
+                endY = startY + h
+                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                y = startY - 15 if startY - 15 > 15 else startY + 15
+                cv2.putText(frame, "Tracking...", (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    cv2.imshow('Gesture & Person Detection', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()

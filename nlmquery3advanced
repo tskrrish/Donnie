@@ -1,0 +1,138 @@
+import cv2
+import torch
+import transformers
+import sounddevice as sd
+import numpy as np
+from gtts import gTTS
+import os
+import speech_recognition as sr
+
+# Load YOLOv5 model from ultralytics
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+
+# Initialize video capture from EpocCam (usually detected as the first webcam)
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Error: Could not open video stream from EpocCam")
+    exit()
+
+# Load the Hugging Face question-answering model
+qa_pipeline = transformers.pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
+
+# Load the GPT-2 model for text generation
+gpt2_pipeline = transformers.pipeline("text-generation", model="gpt2")
+
+def answer_query(query, detected_objects):
+    # Construct the objects description from detected objects
+    objects_description = ". ".join([f"There is a {obj[0]} with confidence {obj[1]:.2f}." for obj in detected_objects])
+    context = f"The objects detected in the current frame are: {objects_description}."
+
+    # Add additional information about the detected objects to create a more detailed context
+    detailed_descriptions = {
+        "person": "A person can be involved in various activities such as walking, sitting, or holding different objects.",
+        "phone": "A phone is commonly used for calling, texting, or browsing the internet.",
+        "book": "A book can be used for reading. People often hold books in their hands.",
+        "bottle": "A bottle can be used to hold liquids. People often carry bottles to drink water or other beverages.",
+        "cup": "A cup is used for drinking beverages like coffee or tea.",
+        "laptop": "A laptop is used for working, browsing the internet, or watching videos.",
+        "chair": "A chair is used for sitting.",
+        "table": "A table is used to place items on or for working.",
+        "bag": "A bag is used to carry personal belongings.",
+        "key": "Keys are used to lock or unlock doors.",
+        "pen": "A pen is used for writing.",
+        "notebook": "A notebook is used for writing or taking notes.",
+        "glasses": "Glasses are worn to correct vision or protect eyes from sunlight.",
+        "headphones": "Headphones are used to listen to music or other audio privately.",
+        "wallet": "A wallet is used to carry money and cards."
+    }
+
+    # Add context for combinations of objects
+    combination_descriptions = {
+        ("person", "phone"): "A person holding a phone might be making a call, texting, or browsing the internet.",
+        ("person", "bottle"): "A person holding a bottle might be drinking water or another beverage.",
+        ("person", "cup"): "A person holding a cup might be drinking coffee or tea.",
+        ("person", "laptop"): "A person with a laptop might be working, browsing the internet, or watching videos.",
+        ("person", "book"): "A person holding a book might be reading.",
+        ("person", "bag"): "A person carrying a bag might be transporting personal belongings."
+    }
+
+    # Add details to the context
+    for obj in detected_objects:
+        obj_name = obj[0]
+        if obj_name in detailed_descriptions:
+            context += " " + detailed_descriptions[obj_name]
+
+    # Add combination context
+    detected_object_names = [obj[0] for obj in detected_objects]
+    for combo, description in combination_descriptions.items():
+        if all(item in detected_object_names for item in combo):
+            context += " " + description
+
+    # Get initial short answer from the QA model
+    response = qa_pipeline(question=query, context=context)
+    initial_answer = response['answer']
+    
+    # Generate a longer, more detailed response using GPT-2
+    extended_context = f"Question: {query}\nInitial Answer: {initial_answer}\nContext: {context}\nDetailed Response:"
+    gpt2_input = extended_context
+    gpt2_response = gpt2_pipeline(gpt2_input, max_length=300, num_return_sequences=1)
+    detailed_answer = gpt2_response[0]['generated_text']
+
+    return detailed_answer
+
+def listen_for_query():
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening for query...")
+        audio_data = r.listen(source)
+        print("Recognizing...")
+        query = r.recognize_google(audio_data)
+        print(f"Query: {query}")
+        return query
+
+def speak_answer(answer):
+    print(f"Answer: {answer}")
+    tts = gTTS(text=answer, lang='en')
+    tts.save("answer.mp3")
+    os.system("mpg321 answer.mp3")  # You may need to install mpg321 or change the command to suit your OS
+
+detected_objects = []
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture image")
+        break
+
+    # Convert frame to RGB
+    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Run detection
+    results = model(img_rgb)
+
+    # Extract results
+    labels, cord = results.xyxyn[0][:, -1], results.xyxyn[0][:, :-1]
+
+    n = len(labels)
+    x_shape, y_shape = frame.shape[1], frame.shape[0]
+
+    detected_objects = []  # Clear previous detections
+    for i in range(n):
+        row = cord[i]
+        if row[4] >= 0.2:  # Confidence threshold
+            x1, y1, x2, y2 = int(row[0] * x_shape), int(row[1] * y_shape), int(row[2] * x_shape), int(row[3] * y_shape)
+            bgr = (0, 255, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), bgr, 2)
+            detected_objects.append((model.names[int(labels[i])], float(row[4])))
+
+    cv2.imshow("Image", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        query = listen_for_query()
+        answer = answer_query(query, detected_objects)
+        speak_answer(answer)
+        break
+
+cap.release()
+cv2.destroyAllWindows()

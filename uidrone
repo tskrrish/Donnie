@@ -1,0 +1,43 @@
+import speech_recognition as sr
+from transformers import pipeline
+import pyttsx3
+
+# Initialize speech recognizer
+recognizer = sr.Recognizer()
+
+# Initialize NLP model (you can choose a different model)
+nlp = pipeline("conversational", model="facebook/blenderbot-400M-distill")
+
+# Initialize TTS engine
+tts_engine = pyttsx3.init()
+
+def recognize_speech():
+    with sr.Microphone() as source:
+        print("Listening...")
+        audio = recognizer.listen(source)
+        try:
+            text = recognizer.recognize_google(audio)
+            print(f"You said: {text}")
+            return text
+        except sr.UnknownValueError:
+            print("Sorry, I did not understand that.")
+            return None
+        except sr.RequestError:
+            print("Could not request results from Google Speech Recognition service.")
+            return None
+
+def generate_response(text):
+    response = nlp(text)
+    return response[0]["generated_text"]
+
+def speak(text):
+    tts_engine.say(text)
+    tts_engine.runAndWait()
+
+if __name__ == "__main__":
+    while True:
+        user_input = recognize_speech()
+        if user_input:
+            response = generate_response(user_input)
+            print(f"Bot: {response}")
+            speak(response)
